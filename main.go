@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtwatch/gst"
@@ -16,67 +15,59 @@ import (
 const homeHTML = `<!DOCTYPE html>
 <html lang="en">
 	<head>
-		<title>synced-playback</title>
+		<title>dvbsrc WebRTC Demo</title>
 	</head>
 	<body id="body">
 		<video id="video1" autoplay playsinline></video>
 
-		<div>
-		  <input type="number" id="seekTime" value="30">
-		  <button type="button" onClick="seekClick()">Seek</button>
-		  <button type="button" onClick="playClick()">Play</button>
-		  <button type="button" onClick="pauseClick()">Pause</button>
-		</div>
-
 		<script>
-			let conn = new WebSocket('ws://' + window.location.host + '/ws')
-			let pc = new RTCPeerConnection()
-
-			window.seekClick = () => {
-				conn.send(JSON.stringify({event: 'seek', data: document.getElementById('seekTime').value}))
-			}
-			window.playClick = () => {
-				conn.send(JSON.stringify({event: 'play', data: ''}))
-			}
-			window.pauseClick = () => {
-				conn.send(JSON.stringify({event: 'pause', data: ''}))
-			}
+			let pc = new RTCPeerConnection();
+			pc.addTransceiver('video', {direction: 'recvonly'});
+			pc.addTransceiver('audio', {direction: 'recvonly'});
 
 			pc.ontrack = function (event) {
 			  if (event.track.kind === 'audio') {
-				return
+					return;
 			  }
-			  var el = document.getElementById('video1')
-			  el.srcObject = event.streams[0]
-			  el.autoplay = true
-			  el.controls = true
-			}
+			  var el = document.getElementById('video1');
+			  el.srcObject = event.streams[0];
+			  el.autoplay = true;
+			  el.controls = true;
+			};
+
+			let conn = new WebSocket('ws://' + window.location.host + '/ws');
+			window.conn = conn;
 
 			conn.onopen = () => {
-				pc.createOffer({offerToReceiveVideo: true, offerToReceiveAudio: true}).then(offer => {
-					pc.setLocalDescription(offer)
-					conn.send(JSON.stringify({event: 'offer', data: JSON.stringify(offer)}))
-				})
-			}
+				console.log('Connection opened');
+			};
+
 			conn.onclose = evt => {
-				console.log('Connection closed')
-			}
+				console.log('Connection closed');
+			};
+
 			conn.onmessage = evt => {
-				let msg = JSON.parse(evt.data)
+				let msg = JSON.parse(evt.data);
 				if (!msg) {
-					return console.log('failed to parse msg')
+					return console.log('failed to parse msg');
 				}
 
 				switch (msg.event) {
-				case 'answer':
-					answer = JSON.parse(msg.data)
-					if (!answer) {
-						return console.log('failed to parse answer')
+				case 'offer':
+					offer = JSON.parse(msg.data);
+					if (!offer) {
+						return console.log('failed to parse offer');
 					}
-					pc.setRemoteDescription(answer)
+					console.log('Received offer', offer);
+					(async () => {
+						pc.setRemoteDescription(offer);
+						const answer = await pc.createAnswer();
+						await pc.setLocalDescription(answer);
+						console.log('Sending answer', answer);
+						conn.send(JSON.stringify({event: 'answer', data: JSON.stringify(answer)}));
+					})();
 				}
-			}
-			window.conn = conn
+			};
 		</script>
 	</body>
 </html>
@@ -101,86 +92,47 @@ type websocketMessage struct {
 }
 
 func main() {
-	containerPath := ""
 	httpListenAddress := ""
-	flag.StringVar(&containerPath, "container-path", "", "path to the media file you want to playback")
 	flag.StringVar(&httpListenAddress, "http-listen-address", ":8080", "address for HTTP server to listen on")
 	flag.Parse()
 
-	if containerPath == "" {
-		panic("-container-path must be specified")
-	}
-
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
-	})
+	log.Println("Initializing WebRTC PeerConnection")
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	videoTrack, err = pc.NewTrack(webrtc.DefaultPayloadTypeH264, 5000, "synced-video", "synced-video")
+	log.Println("Initializing WebRTC tracks")
+	videoTrack, err = pc.NewTrack(webrtc.DefaultPayloadTypeVP8, 5000, "sync", "sync")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	audioTrack, err = pc.NewTrack(webrtc.DefaultPayloadTypeOpus, 5001, "synced-video", "synced-video")
+	audioTrack, err = pc.NewTrack(webrtc.DefaultPayloadTypeOpus, 5001, "sync", "sync")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	pipeline = gst.CreatePipeline(containerPath, audioTrack, videoTrack)
+	log.Println("Creating and starting pipeline")
+	pipeline = gst.CreatePipeline(audioTrack, videoTrack)
 	pipeline.Start()
 
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/ws", serveWs)
 
-	fmt.Println(fmt.Sprintf("Video file '%s' is now available on '%s', have fun!", containerPath, httpListenAddress))
+	log.Printf("Television is now available on '%s', have fun!\n", httpListenAddress)
 	log.Fatal(http.ListenAndServe(httpListenAddress, nil))
 }
 
 func handleWebsocketMessage(pc *webrtc.PeerConnection, ws *websocket.Conn, message *websocketMessage) error {
 	switch message.Event {
-	case "play":
-		pipeline.Play()
-	case "pause":
-		pipeline.Pause()
-	case "seek":
-		i, err := strconv.ParseInt(message.Data, 0, 64)
-		if err != nil {
-			log.Print(err)
-		}
-		pipeline.SeekToTime(i)
-	case "offer":
-		offer := webrtc.SessionDescription{}
-		if err := json.Unmarshal([]byte(message.Data), &offer); err != nil {
+	case "answer":
+		answer := webrtc.SessionDescription{}
+		if err := json.Unmarshal([]byte(message.Data), &answer); err != nil {
 			return err
 		}
 
-		if err := pc.SetRemoteDescription(offer); err != nil {
-			return err
-		}
-
-		answer, err := pc.CreateAnswer(nil)
-		if err != nil {
-			return err
-		}
-		if err := pc.SetLocalDescription(answer); err != nil {
-			return err
-		}
-
-		answerString, err := json.Marshal(answer)
-		if err != nil {
-			return err
-		}
-
-		if err = ws.WriteJSON(&websocketMessage{
-			Event: "answer",
-			Data:  string(answerString),
-		}); err != nil {
+		if err := pc.SetRemoteDescription(answer); err != nil {
 			return err
 		}
 	}
@@ -195,6 +147,7 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	defer ws.Close()
 
 	peerConnection, err := webrtc.NewPeerConnection(peerConnectionConfig)
 	if err != nil {
@@ -213,6 +166,32 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 			log.Println(err)
 		}
 	}()
+
+	sdp, err := peerConnection.CreateOffer(nil)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	if err := peerConnection.SetLocalDescription(sdp); err != nil {
+		log.Print(err)
+		return
+	}
+
+	sdpData, err := json.Marshal(sdp)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	offerMsg := &websocketMessage{
+		Event: "offer",
+		Data:  string(sdpData),
+	}
+	if err := ws.WriteJSON(offerMsg); err != nil {
+		log.Print(err)
+		return
+	}
 
 	message := &websocketMessage{}
 	for {

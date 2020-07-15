@@ -8,7 +8,6 @@ package gst
 */
 import "C"
 import (
-	"fmt"
 	"io"
 	"sync"
 	"unsafe"
@@ -31,10 +30,32 @@ type Pipeline struct {
 var pipeline = &Pipeline{}
 var pipelinesLock sync.Mutex
 
-// CreatePipeline creates a GStreamer Pipeline
-func CreatePipeline(containerPath string, audioTrack, videoTrack *webrtc.Track) *Pipeline {
-	pipelineStr := fmt.Sprintf("filesrc location=\"%s\" ! decodebin name=demux ! queue ! x264enc bframes=0 speed-preset=veryfast key-int-max=60 ! video/x-h264,stream-format=byte-stream ! appsink name=video demux. ! queue ! audioconvert ! audioresample ! opusenc ! appsink name=audio", containerPath)
+// This is the frequency and program number for KCTS 9 (PBS) in Seattle, WA.
+const pipelineStr = `
+	dvbsrc delsys=atsc modulation=8vsb frequency=189000000
+	! tsdemux name=demux program-number=3
 
+	demux.
+	! queue leaky=downstream max-size-time=2500000000 max-size-buffers=0 max-size-bytes=0
+	! decodebin
+	! videoconvert
+	! videoscale
+	! video/x-raw,width=853,height=480
+	! vp8enc deadline=1
+	! appsink name=video
+
+	demux.
+	! queue leaky=downstream max-size-time=2500000000 max-size-buffers=0 max-size-bytes=0
+	! decodebin
+	! audioconvert
+	! audioresample
+	! audio/x-raw,rate=48000
+	! opusenc bitrate=128000
+	! appsink name=audio
+`
+
+// CreatePipeline creates a GStreamer Pipeline
+func CreatePipeline(audioTrack, videoTrack *webrtc.Track) *Pipeline {
 	pipelineStrUnsafe := C.CString(pipelineStr)
 	defer C.free(unsafe.Pointer(pipelineStrUnsafe))
 
@@ -53,21 +74,6 @@ func (p *Pipeline) Start() {
 	// This will signal to goHandlePipelineBuffer
 	// and provide a method for cancelling sends.
 	C.gstreamer_send_start_pipeline(p.Pipeline)
-}
-
-// Play sets the pipeline to PLAYING
-func (p *Pipeline) Play() {
-	C.gstreamer_send_play_pipeline(p.Pipeline)
-}
-
-// Pause sets the pipeline to PAUSED
-func (p *Pipeline) Pause() {
-	C.gstreamer_send_pause_pipeline(p.Pipeline)
-}
-
-// SeekToTime seeks on the pipeline
-func (p *Pipeline) SeekToTime(seekPos int64) {
-	C.gstreamer_send_seek(p.Pipeline, C.int64_t(seekPos))
 }
 
 const (
